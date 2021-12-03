@@ -24,9 +24,10 @@ python finetune_on_target.py \
 	--output_dir "${OUTPUT_DIR}/models/finetuned/${1}_${2}_${3}/" \
 	--freeze_bert \
 	--train_batch_size 32 \
-	--pregen_emb_path "${OUTPUT_DIR}/pregen_embs/pregen_${2}_cat4_${1}" \
+	--pregen_emb_path "/nobackup/users/nhulkund/6.864/pregen_embs/pregen_${2}_cat4_${1}" \
 	--task_type binary \
 	--other_fields age sofa sapsii_prob sapsii_prob oasis oasis_prob \
         --gridsearch_classifier \
         --gridsearch_c \
-        --emb_method cat4
+        --emb_method cat4 \
+  --use_dro True

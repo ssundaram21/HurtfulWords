@@ -81,9 +81,11 @@ assert(target in df.columns)
 
 #even if no adversary, must have valid protected group column for code to work
 #if args.use_adversary:
+protected_group = args.protected_group
+group_counts = None # TODO
+n_groups = None # TODO
+assert(protected_group in df.columns)
 if args.use_dro:
-    protected_group = args.protected_group
-    assert(protected_group in df.columns)
     if args.use_new_mapping:
         mapping = Constants.newmapping
         for i in Constants.drop_groups[protected_group]:
@@ -156,10 +158,13 @@ class EmbFeature():
         self.other_fields = other_fields
 
 class Embdataset(data.Dataset):
-    def __init__(self, features, gen_type):
+    def __init__(self, features, gen_type, n_groups, group_counts):
         self.features = features #list of EmbFeatures
         self.gen_type = gen_type
         self.length = len(features)
+        self.n_groups = n_groups # DEFINE
+        self.group_counts = group_counts # DEFINE
+        self.group_str = None # DEFINE
 
     def __len__(self):
         return self.length
@@ -252,21 +257,7 @@ if args.task_type == 'binary':
 elif args.task_type == 'multiclass':
     criterion = nn.CrossEntropyLoss()
 elif args.task_type == 'regression':
-    criterion = nn.MSELoss() 
-
-if args.use_dro:
-    # DEAL WITH ARGUMENTS & MAKE LOSS COMPUTER FOR TEST AND VAL
-    train_loss_computer = LossComputer(
-        criterion,
-        is_robust=args.robust,
-        dataset=dataset['train_data'],
-        alpha=args.alpha,
-        gamma=args.gamma,
-        adj=adjustments,
-        step_size=args.robust_step_size,
-        normalize_loss=args.use_normalized_loss,
-        btl=args.btl,
-        min_var_weight=args.minimum_variational_weight)
+    criterion = nn.MSELoss()
 
 
 #criterion_adv = nn.CrossEntropyLoss()
@@ -331,9 +322,28 @@ if args.freeze_bert: #only need to precalculate for training and val set
         features_train_embs = get_embs(training_generator)
         features_val_embs = get_embs(val_generator)
         features_test_embs = get_embs(test_generator)
-    training_generator = data.DataLoader(Embdataset(features_train_embs, 'train'), shuffle = True, batch_size = args.train_batch_size, drop_last = True)
-    val_generator = data.DataLoader(Embdataset(features_val_embs, 'val'), shuffle = False,  batch_size = args.train_batch_size)
-    test_generator= data.DataLoader(Embdataset(features_test_embs, 'test'), shuffle = False,  batch_size = args.train_batch_size)
+
+    train_dataset = Embdataset(features_train_embs, 'train', n_groups, group_counts)
+    val_dataset = Embdataset(features_val_embs, 'val', n_groups, group_counts)
+    test_dataset = Embdataset(features_test_embs, 'test', n_groups, group_counts)
+    training_generator = data.DataLoader(train_dataset, shuffle = True, batch_size = args.train_batch_size, drop_last = True)
+    val_generator = data.DataLoader(val_dataset, shuffle = False,  batch_size = args.train_batch_size)
+    test_generator= data.DataLoader(test_dataset, shuffle = False,  batch_size = args.train_batch_size)
+
+if args.use_dro:
+    # DEAL WITH ARGUMENTS & MAKE LOSS COMPUTER FOR TEST AND VAL
+    adjustments = [0.0]
+    train_loss_computer = LossComputer(
+        criterion,
+        is_robust=True,
+        dataset=train_dataset,
+        alpha=0.2,
+        gamma=0.1,
+        adj=adjustments,
+        step_size=0.01,
+        normalize_loss=True,
+        btl=False,
+        min_var_weight=0)
 
 num_train_epochs = args.max_num_epochs
 learning_rate = args.lr
@@ -367,21 +377,35 @@ def evaluate_on_set(generator, predictor, emb_gen = False, c_val=2):
         prediction_dict: a dictionary mapping note_id (str) to list of predicted probabilities
         merged_preds: a dictionary mapping note_id (str) to a single merged probability
         embs: a dictionary mapping note_id (str) to a numpy 2d array (shape num_seq * 768)
+        group_labels
     '''
     model.eval()
     predictor.eval()
     if generator.dataset.gen_type == 'val':
         prediction_dict = {str(idx): [0]*row['num_seqs'] for idx, row in val_df.iterrows()}
         embs = {str(idx):np.zeros(shape = (row['num_seqs'], EMB_SIZE)) for idx, row in val_df.iterrows()}
-        # initialize validation loss
+        if args.use_dro:
+            loss_computer = LossComputer(
+                criterion,
+                is_robust=True,
+                dataset=val_dataset,
+                step_size=0.01,
+                alpha=0.2)
     elif generator.dataset.gen_type == 'test':
         prediction_dict = {str(idx): [0]*row['num_seqs'] for idx, row in test_df.iterrows()}
         embs = {str(idx):np.zeros(shape = (row['num_seqs'], EMB_SIZE)) for idx, row in test_df.iterrows()}
-        # initialize test loss
+        if args.use_dro:
+            loss_computer = LossComputer(
+                criterion,
+                is_robust=True,
+                dataset=test_dataset,
+                step_size=0.01,
+                alpha=0.2)
     elif generator.dataset.gen_type == 'train':
         prediction_dict = {str(idx): [0]*row['num_seqs'] for idx, row in train_df.iterrows()}
         embs = {str(idx):np.zeros(shape = (row['num_seqs'], EMB_SIZE)) for idx, row in train_df.iterrows()}
 
+    group_labels = {}
     if emb_gen:
         with torch.no_grad():
             for embs, y, guid, other_vars, group in generator:
@@ -395,6 +419,7 @@ def evaluate_on_set(generator, predictor, emb_gen = False, c_val=2):
                     loss = loss_computer.loss(outputs, y, group, is_training)
                 for c,i in enumerate(guid):
                     note_id, seq_id = i.split('-')
+                    group_labels[note_id] = group
                     if args.task_type in ['binary', 'regression']:
                         prediction_dict[note_id][int(seq_id)] = preds[c].item()
                     else:
@@ -563,6 +588,12 @@ for predictor_params in grid:
         model.eval()
         predictor.eval()
         val_loss = 0
+        val_loss_computer = LossComputer(
+            criterion,
+            is_robust=args.robust,
+            dataset=dataset['val_data'],
+            step_size=args.robust_step_size,
+            alpha=args.alpha)
         with torch.no_grad():
             if args.freeze_bert:
                 checkpoints = {PREDICTOR_CHECKPOINT_PATH: predictor}
@@ -627,7 +658,7 @@ for predictor_params in grid:
 
     if args.gridsearch_classifier:
         auprcs = [] #one value for each in c grid
-        prediction_dict, _, _ = evaluate_on_set(val_generator, predictor, emb_gen = args.freeze_bert)
+        prediction_dict, _, _, group_labels = (val_generator, predictor, emb_gen = args.freeze_bert)
         for c_val in c_grid:
             merged_preds_val = merge_preds(prediction_dict, c_val)
             merged_preds_val_list = [merged_preds_val[str(i)] for i in actual_val.index]
@@ -649,8 +680,9 @@ else:
     opt_c = 2.0
 
 # evaluate on val set
-prediction_dict_val, merged_preds_val, embs_val = evaluate_on_set(val_generator, predictor, emb_gen = args.freeze_bert, c_val = opt_c)
+prediction_dict_val, merged_preds_val, embs_val, group_labels_val = evaluate_on_set(val_generator, predictor, emb_gen = args.freeze_bert, c_val = opt_c)
 merged_preds_val_list = [merged_preds_val[str(i)] for i in actual_val.index]
+
 
 if args.task_type == 'binary':
 	acc = accuracy_score(actual_val.values.astype(int), np.array(merged_preds_val_list).round())
@@ -668,9 +700,9 @@ elif args.task_type == 'multiclass':
 	report = classification_report(actual_val.values.astype(int), np.array(merged_preds_val_list))
 	print(report)
 
-prediction_dict_test, merged_preds_test, embs_test = evaluate_on_set(test_generator, predictor, emb_gen = args.freeze_bert,  c_val = opt_c)
+prediction_dict_test, merged_preds_test, embs_test, group_labels_test = evaluate_on_set(test_generator, predictor, emb_gen = args.freeze_bert,  c_val = opt_c)
 if args.output_train_stats:
-    prediction_dict_train, merged_preds_train, embs_train = evaluate_on_set(training_generator, predictor, emb_gen = args.freeze_bert, c_val = opt_c)
+    prediction_dict_train, merged_preds_train, embs_train, group_labels_train = evaluate_on_set(training_generator, predictor, emb_gen = args.freeze_bert, c_val = opt_c)
 else:
     merged_preds_train, embs_train = {}, {}
 
