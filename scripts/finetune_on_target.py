@@ -9,6 +9,7 @@ import Constants
 import torch
 import torch.nn as nn
 from torch.utils import data
+import sys
 import pickle
 from pytorch_pretrained_bert import BertTokenizer, BertModel
 from run_classifier_dataset_utils import InputExample, convert_examples_to_features
@@ -22,6 +23,7 @@ import json
 from pytorch_pretrained_bert.file_utils import WEIGHTS_NAME, CONFIG_NAME
 from utils import create_hdf_key, Classifier, get_emb_size, MIMICDataset, extract_embeddings, EarlyStopping, load_checkpoint
 from sklearn.model_selection import ParameterGrid
+from loss import LossComputer
 
 parser = argparse.ArgumentParser('Fine-tunes a pre-trained BERT model on a certain target for one fold. Outputs fine-tuned BERT model and classifier, ' +
                                  'as well as a pickled dictionary mapping id: predicted probability')
@@ -55,6 +57,7 @@ parser.add_argument('--use_new_mapping', help = 'whether to use new mapping for 
 parser.add_argument('--pregen_emb_path', help = '''if embeddings have been precomputed, can provide a path here (as a pickled dictionary mapping note_id:numpy array).
                         Will only be used if freeze_bert. note_ids in this dictionary must a be a superset of the note_ids in df_path''', type = str)
 parser.add_argument('--overwrite', help = 'whether to overwrite existing model/predictions', action = 'store_true')
+parser.add_argument('--use_dro', help = 'use dro', default=False, type=bool)
 args = parser.parse_args()
 
 if os.path.isfile(os.path.join(args.output_dir, 'preds.pkl')) and not args.overwrite:
@@ -66,6 +69,10 @@ df = pd.read_pickle(args.df_path)
 if 'note_id' in df.columns:
     df = df.set_index('note_id')
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(device)
+sys.stdout.flush()
+
 tokenizer = BertTokenizer.from_pretrained(args.model_path)
 model = BertModel.from_pretrained(args.model_path)
 
@@ -73,7 +80,8 @@ target = args.target_col_name
 assert(target in df.columns)
 
 #even if no adversary, must have valid protected group column for code to work
-if args.use_adversary:
+#if args.use_adversary:
+if args.use_dro:
     protected_group = args.protected_group
     assert(protected_group in df.columns)
     if args.use_new_mapping:
@@ -88,6 +96,7 @@ if args.freeze_bert:
     for param in model.parameters():
         param.requires_grad = False
 
+print(df['fold'].head())
 assert('fold' in df.columns)
 for i in args.fold_id:
 	assert(i in df['fold'].unique())
@@ -113,18 +122,19 @@ def convert_input_example(note_id, text, seqIdx, target, group, other_fields = [
 # in training generator, return all folds except this.
 # in validation generator, return only this fold
 
+# i is the sequence within the row, c is the counter of the sequence, idx is the row number
 print('Converting input examples to appropriate format...', flush = True)
-examples_train = [convert_input_example(idx, i, c, row[target], row[protected_group] if args.use_adversary else 0,
+examples_train = [convert_input_example(idx, i, c, row[target], row[protected_group] if args.use_dro else 0,
                                        [] if len(other_fields_to_include) ==0 else row[other_fields_to_include].values.tolist())
                   for idx, row in train_df.iterrows()
                   for c, i in enumerate(row.seqs)]
 
-examples_eval = [convert_input_example(idx, i, c, row[target], row[protected_group] if args.use_adversary else 0,
+examples_eval = [convert_input_example(idx, i, c, row[target], row[protected_group] if args.use_dro else 0,
                                       [] if len(other_fields_to_include) ==0 else row[other_fields_to_include].values.tolist())
                   for idx, row in val_df.iterrows()
                   for c, i in enumerate(row.seqs)]
 
-examples_test = [convert_input_example(idx, i, c, row[target], row[protected_group] if args.use_adversary else 0,
+examples_test = [convert_input_example(idx, i, c, row[target], row[protected_group] if args.use_dro else 0,
                                       [] if len(other_fields_to_include) ==0 else row[other_fields_to_include].values.tolist())
                   for idx, row in test_df.iterrows()
                   for c, i in enumerate(row.seqs)]
@@ -162,11 +172,13 @@ class Embdataset(data.Dataset):
             y = torch.tensor(self.features[index].y, dtype = torch.long)
         other_fields = self.features[index].other_fields
         guid = self.features[index].guid
+        group = self.features[index].group # we added this and returning group for the case in which BERT is frozen and we are using DRO
 
-        return emb, y, guid, other_fields
+        return emb, y, guid, other_fields, group  # why not returning the group too?
 
 
-class Discriminator(nn.Module):
+
+"""class Discriminator(nn.Module):
     def __init__(self, input_dim, num_layers, num_categories, lm):
         super(Discriminator, self).__init__()
         self.num_layers = num_layers
@@ -188,6 +200,7 @@ class Discriminator(nn.Module):
         for i in range(len(self.layers)):
             x = self.layers[i](x)
         return x
+"""
 
 if args.gridsearch_classifier:
     assert(args.freeze_bert)
@@ -216,14 +229,16 @@ if args.task_type == 'multiclass':
     for i in grid:
         i['multiclass_nclasses'] = len(df[target].unique())
 
-if args.use_adversary:
-	discriminator = Discriminator(EMB_SIZE + int(args.fairness_def == 'odds'), args.adv_layers, len(mapping[protected_group]), args.lm)
+#if args.use_adversary:
+#	discriminator = Discriminator(EMB_SIZE + int(args.fairness_def == 'odds'), args.adv_layers, len(mapping[protected_group]), args.lm)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 n_gpu = torch.cuda.device_count()
 model.to(device)
-if args.use_adversary:
-    discriminator.to(device)
+print(device)
+sys.stdout.flush()
+#if args.use_adversary:
+#    discriminator.to(device)
 
 seed = args.seed
 random.seed(seed)
@@ -237,16 +252,31 @@ if args.task_type == 'binary':
 elif args.task_type == 'multiclass':
     criterion = nn.CrossEntropyLoss()
 elif args.task_type == 'regression':
-    criterion = nn.MSELoss()
+    criterion = nn.MSELoss() 
 
-criterion_adv = nn.CrossEntropyLoss()
+if args.use_dro:
+    # DEAL WITH ARGUMENTS & MAKE LOSS COMPUTER FOR TEST AND VAL
+    train_loss_computer = LossComputer(
+        criterion,
+        is_robust=args.robust,
+        dataset=dataset['train_data'],
+        alpha=args.alpha,
+        gamma=args.gamma,
+        adj=adjustments,
+        step_size=args.robust_step_size,
+        normalize_loss=args.use_normalized_loss,
+        btl=args.btl,
+        min_var_weight=args.minimum_variational_weight)
+
+
+#criterion_adv = nn.CrossEntropyLoss()
 
 if n_gpu > 1:
     model = torch.nn.DataParallel(model)
     criterion = torch.nn.DataParallel(criterion)
-    if args.use_adversary:
-        discriminator = torch.nn.DataParallel(discriminator)
-        criterion_adv = torch.nn.DataParallel(criterion_adv)
+ #   if args.use_adversary:
+ #       discriminator = torch.nn.DataParallel(discriminator)
+ #       criterion_adv = torch.nn.DataParallel(criterion_adv)
 
 
 def get_embs(generator):
@@ -272,7 +302,7 @@ def get_embs(generator):
 
 
 print('Featurizing examples...', flush = True)
-if not args.pregen_emb_path:
+if not args.pregen_emb_path: # happens if not freeze bert
     features_train = convert_examples_to_features(examples_train,
                                             Constants.MAX_SEQ_LEN, tokenizer, output_mode = ('regression' if args.task_type == 'regression' else 'classification'))
 
@@ -338,27 +368,31 @@ def evaluate_on_set(generator, predictor, emb_gen = False, c_val=2):
         merged_preds: a dictionary mapping note_id (str) to a single merged probability
         embs: a dictionary mapping note_id (str) to a numpy 2d array (shape num_seq * 768)
     '''
-
     model.eval()
     predictor.eval()
     if generator.dataset.gen_type == 'val':
         prediction_dict = {str(idx): [0]*row['num_seqs'] for idx, row in val_df.iterrows()}
         embs = {str(idx):np.zeros(shape = (row['num_seqs'], EMB_SIZE)) for idx, row in val_df.iterrows()}
+        # initialize validation loss
     elif generator.dataset.gen_type == 'test':
         prediction_dict = {str(idx): [0]*row['num_seqs'] for idx, row in test_df.iterrows()}
         embs = {str(idx):np.zeros(shape = (row['num_seqs'], EMB_SIZE)) for idx, row in test_df.iterrows()}
+        # initialize test loss
     elif generator.dataset.gen_type == 'train':
         prediction_dict = {str(idx): [0]*row['num_seqs'] for idx, row in train_df.iterrows()}
         embs = {str(idx):np.zeros(shape = (row['num_seqs'], EMB_SIZE)) for idx, row in train_df.iterrows()}
 
     if emb_gen:
         with torch.no_grad():
-            for embs, y, guid, other_vars in generator:
+            for embs, y, guid, other_vars, group in generator:
                 embs = embs.to(device)
                 y = y.to(device)
+                group = group.to(device)
                 for i in other_vars:
                     embs = torch.cat([embs, i.float().unsqueeze(dim = 1).to(device)], 1)
                 preds = predictor(embs).detach().cpu()
+                if args.use_dro and (generator.dataset.gen_type == 'val' or generator.dataset.gen_type == 'test'):
+                    loss = loss_computer.loss(outputs, y, group, is_training)
                 for c,i in enumerate(guid):
                     note_id, seq_id = i.split('-')
                     if args.task_type in ['binary', 'regression']:
@@ -392,8 +426,11 @@ def evaluate_on_set(generator, predictor, emb_gen = False, c_val=2):
 
 
     merged_preds = merge_preds(prediction_dict, c_val)
-
-    return (prediction_dict, merged_preds, embs)
+#    if args.use_dro and (generator.dataset.gen_type == 'val' or generator.dataset.gen_type == 'test'):
+#        avg_group_acc = loss.avg_group_acc
+#    else:
+#        avg_group_acc = None
+    return (prediction_dict, merged_preds, embs, group_labels)
 
 def merge_preds(prediction_dict, c=2):
     merged_preds = {}
@@ -415,12 +452,14 @@ for predictor_params in grid:
     if n_gpu > 1:
         predictor = torch.nn.DataParallel(predictor)
 
-    if not(args.freeze_bert) and not(args.use_adversary):
+    #if not(args.freeze_bert) and not(args.use_adversary):
+    if not(args.freeze_bert):
         param_optimizer = list(model.named_parameters()) + list(predictor.named_parameters())
-    elif args.freeze_bert and not(args.use_adversary):
+    #elif args.freeze_bert and not(args.use_adversary):
+    elif args.freeze_bert:
         param_optimizer = list(predictor.named_parameters())
-    elif args.freeze_bert and args.use_adversary:
-        raise Exception('No purpose in using an adversary if BERT layers are frozen')
+#    elif args.freeze_bert and args.use_adversary:
+#        raise Exception('No purpose in using an adversary if BERT layers are frozen')
     else:
         param_optimizer = list(model.named_parameters()) + list(predictor.named_parameters()) + list(discriminator.named_parameters())
 
@@ -445,12 +484,12 @@ for predictor_params in grid:
         else:
             model.eval()
         predictor.train()
-        if args.use_adversary:
-            discriminator.train()
+    #    if args.use_adversary:
+    #        discriminator.train()
         running_loss = 0.0
         num_steps = 0
         with tqdm(total=len(training_generator), desc="Epoch %s"%epoch) as pbar:
-            if not args.freeze_bert:
+            if not args.freeze_bert:  # skip for now -- we are freezing BERT
                 for input_ids, input_mask, segment_ids, y, group, _, other_vars in training_generator:
                     input_ids = input_ids.to(device)
                     segment_ids = segment_ids.to(device)
@@ -493,13 +532,19 @@ for predictor_params in grid:
                     pbar.update(1)
                     pbar.set_postfix_str("Running Training Loss: %.5f" % mean_loss)
             else: # if frozen, use precomputed embeddings to save time
-                for embs, y,_, other_vars in training_generator:
+                for embs, y, _, other_vars, group in training_generator:
                     embs = embs.to(device)
                     y = y.to(device)
+                    group = group.to(device)
                     for i in other_vars:
                         embs = torch.cat([embs, i.float().unsqueeze(dim = 1).to(device)], 1)
                     preds = predictor(embs)
-                    loss = criterion(preds, y)
+                    
+                    if args.use_dro:
+                        # DON'T KNOW g (GROUP ID)
+                        loss = train_loss_computer.loss(preds, y, group, is_training=True)
+                    else:
+                        loss = criterion(preds, y)
 
                     if n_gpu > 1:
                         loss = loss.mean()
@@ -521,13 +566,17 @@ for predictor_params in grid:
         with torch.no_grad():
             if args.freeze_bert:
                 checkpoints = {PREDICTOR_CHECKPOINT_PATH: predictor}
-                for embs, y, guid, other_vars in val_generator:
+                for embs, y, guid, other_vars, group in val_generator:
                     embs = embs.to(device)
                     y = y.to(device)
+                    group = group.to(device)
                     for i in other_vars:
                         embs = torch.cat([embs, i.float().unsqueeze(dim = 1).to(device)], 1)
                     preds = predictor(embs)
-                    loss = criterion(preds, y)
+                    if args.use_dro:
+                        loss = val_loss_computer.loss(preds, y, group, is_training=False)
+                    else:
+                        loss = criterion(preds, y)
 
                     if n_gpu > 1:
                         loss = loss.mean()
