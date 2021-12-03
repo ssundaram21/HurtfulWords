@@ -4,19 +4,21 @@
 #SBATCH -c 30 
 #SBATCH --output=data_processing_%A.out
 #SBATCH --mem 300gb
-set -e
-source activate hurtfulwords
+#SBATCH -t 120:00:00
 
-BASE_DIR="/h/haoran/projects/HurtfulWords/"
-OUTPUT_DIR="/h/haoran/projects/HurtfulWords/data/"
+set -e
+#source activate hurtfulwords
+
+BASE_DIR="/home/nhulkund/6.864/HurtfulWords/"
+OUTPUT_DIR="/nobackup/users/nhulkund/6.864/"
 mkdir -p "$OUTPUT_DIR/finetuning/"
-SCIBERT_DIR="/scratch/gobi1/haoran/shared_data/BERT_DeBias/models/SciBERT"
-MIMIC_BENCHMARK_DIR="/scratch/gobi2/haoran/shared_data/MIMIC_benchmarks/"
+SCIBERT_DIR="/nobackup/users/nhulkund/6.864/scibert_scivocab_uncased/"
+MIMIC_BENCHMARK_DIR="/home/nhulkund/6.864/mimic3-benchmarks"
 
 cd "$BASE_DIR/scripts/"
 
-echo "Processing MIMIC data..."
-python get_data.py $OUTPUT_DIR
+#echo "Processing MIMIC data..."
+#python get_data.py $OUTPUT_DIR
 
 echo "Tokenizing sentences..."
 python sentence_tokenization.py "$OUTPUT_DIR/df_raw.pkl" "$OUTPUT_DIR/df_extract.pkl" "$SCIBERT_DIR"

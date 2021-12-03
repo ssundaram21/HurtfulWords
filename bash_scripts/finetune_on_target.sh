@@ -1,8 +1,7 @@
 #!/bin/bash
-#SBATCH --partition t4 
 #SBATCH --gres gpu:1
 #SBATCH -c 8
-#SBATCH --output=finetune_%A.out
+#SBATCH --output=logs/finetune_%A.log
 #SBATCH --mem 60gb
 
 # $1 - target type {inhosp_mort, phenotype_first, phenotype_all}
@@ -10,15 +9,15 @@
 # $3 - target column name within the dataframe, ex: "Shock", "any_acute"
 
 set -e 
-source activate hurtfulwords
+#source activate wmlce-ea
 
-BASE_DIR="/h/haoran/projects/HurtfulWords"
-OUTPUT_DIR="/scratch/hdd001/home/haoran/shared_data/HurtfulWords/data"
+BASE_DIR="/home/nhulkund/6.864/HurtfulWords"
+OUTPUT_DIR="/home/nhulkund/6.864/HurtfulWords/outputs"
 
 cd "$BASE_DIR/scripts"
 
 python finetune_on_target.py \
-	--df_path "${OUTPUT_DIR}/finetuning/$1" \
+	--df_path "/nobackup/users/nhulkund/6.864/${1}" \
 	--model_path "${OUTPUT_DIR}/models/$2" \
 	--fold_id 9 10\
 	--target_col_name "$3" \
