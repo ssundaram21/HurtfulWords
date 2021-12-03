@@ -21,13 +21,19 @@ import csv
 import logging
 import os
 import sys
+from datetime import datetime
+
 
 from scipy.stats import pearsonr, spearmanr
 from sklearn.metrics import matthews_corrcoef, f1_score
 
-logger = logging.getLogger(__name__)
+logging.basicConfig(
+     filename='log_run_classifier_dataset_utils.log',
+     level=logging.INFO,
+     datefmt='%H:%M:%S'
+ )
 
-
+logger = logging.getLogger()
 class InputExample(object):
     """A single training/test example for simple sequence classification."""
 
@@ -401,7 +407,8 @@ def convert_examples_to_features(examples, max_seq_length,
     features = []
     for (ex_index, example) in enumerate(examples):
         if ex_index % 10000 == 0:
-            logger.info("Writing example %d of %d" % (ex_index, len(examples)))
+            logger.info(str(datetime.now()))
+            logger.info("Writing example %d of %d " % (ex_index, len(examples)))
 
         tokens_a = tokenizer.tokenize(example.text_a)
 

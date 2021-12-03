@@ -14,6 +14,12 @@ from pathlib import Path
 from run_classifier_dataset_utils import InputExample, convert_examples_to_features
 import Constants
 
+import sys
+import builtins
+import os
+print('starting file')
+sys.stdout.flush()
+
 parser = argparse.ArgumentParser('''Given a BERT model and a dataset with a 'seqs' column, outputs a pickled dictionary
                                  mapping note_id to 2D numpy array, where each array is num_seq x emb_dim''')
 parser.add_argument('--df_path', help = 'must have the following columns: seqs, num_seqs, and note_id either as a column or index')
@@ -22,28 +28,39 @@ parser.add_argument('--output_path', type = str)
 parser.add_argument('--emb_method', default = 'last', const = 'last', nargs = '?', choices = ['last', 'sum4', 'cat4'], help = 'how to extract embeddings from BERT output')
 args = parser.parse_args()
 
+print("at the pregen embeddings python file")
+sys.stdout.flush()
 df = pd.read_pickle(args.df_path)
 if 'note_id' in df.columns:
     df = df.set_index('note_id')
+
+print("read pickle file")
+sys.stdout.flush()
 tokenizer = BertTokenizer.from_pretrained(args.model_path)
 model = BertModel.from_pretrained(args.model_path)
+sys.stdout.write("got bert model")
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+print("device: ", str(device))
+sys.stdout.flush()
 def convert_input_example(note_id, text, seqIdx):
     return InputExample(guid = '%s-%s'%(note_id,seqIdx), text_a = text, text_b = None, label = 0, group = 0, other_fields = [])
 
 examples = [convert_input_example(idx, i, c) for idx, row in df.iterrows() for c,i in enumerate(row.seqs)]
-features = convert_examples_to_features(examples,
-                                        Constants.MAX_SEQ_LEN, tokenizer, output_mode = 'classification')
+features = convert_examples_to_features(examples, Constants.MAX_SEQ_LEN, tokenizer, output_mode = 'classification')
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 n_gpu = torch.cuda.device_count()
+sys.stdout.write("GPU count:"+ str(n_gpu))
 model.to(device)
 
-if n_gpu > 1:
-    model = torch.nn.DataParallel(model)
+# if n_gpu > 1:
+#     model = torch.nn.DataParallel(model)
 
 generator = data.DataLoader(MIMICDataset(features, 'train', 'classification'),  shuffle = True,  batch_size = n_gpu*32)
 
+print("got dataloader")
+sys.stdout.flush()
 EMB_SIZE = get_emb_size(args.emb_method)
 def get_embs(generator):
     model.eval()
@@ -62,5 +79,8 @@ def get_embs(generator):
                 embs[note_id][int(seq_id), :] = emb
     return embs
 
+print("about to generate")
+sys.stdout.flush()
 model_name = os.path.basename(os.path.normpath(args.model_path))
 pickle.dump(get_embs(generator), open(args.output_path, 'wb'))
+sys.stdout.write("end of python file")

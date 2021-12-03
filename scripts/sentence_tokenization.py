@@ -8,6 +8,7 @@ import pickle
 from pytorch_pretrained_bert import BertTokenizer, BertModel
 import argparse
 import spacy
+from spacy import Language
 import re
 from heuristic_tokenize import sent_tokenize_rules
 
@@ -25,6 +26,8 @@ df = pd.read_pickle(args.input_loc)
 '''
 Code taken from https://github.com/EmilyAlsentzer/clinicalBERT
 '''
+
+@Language.component('sbd_component')
 def sbd_component(doc):
     for i, token in enumerate(doc[:-2]):
         # define sentence start if period + titlecase token
@@ -56,7 +59,7 @@ def process_text(sent_text):
 def get_sentences(doc):
     temp = []
     for i in doc.sents:
-        s = process_text(i.string)
+        s = process_text(i.text)
         if s is not None:
             temp.append(s)
     return temp
@@ -146,8 +149,8 @@ def repl(m):
     label = s[3:-3].strip()
     return replace_deid(label)
 
-nlp = spacy.load('en_core_sci_md', disable=['tagger','ner'])
-nlp.add_pipe(sbd_component, before='parser')
+nlp = spacy.load('en_core_sci_md', disable=['tagger','ner', 'lemmatizer'])
+nlp.add_pipe('sbd_component', before='parser')
 
 df['sents'], df['sections'] = zip(*df.text.apply(process_note))
 df['mod_text'] = df['sections'].apply(lambda x: '\n'.join(x))
