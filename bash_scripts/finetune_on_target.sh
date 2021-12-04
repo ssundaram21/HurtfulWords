@@ -16,6 +16,9 @@ OUTPUT_DIR="/home/nhulkund/6.864/HurtfulWords/outputs"
 
 cd "$BASE_DIR/scripts"
 
+echo ${1} ${2} ${3}
+
+
 python finetune_on_target.py \
 	--df_path "/nobackup/users/nhulkund/6.864/${1}" \
 	--model_path "${OUTPUT_DIR}/models/$2" \
@@ -25,6 +28,22 @@ python finetune_on_target.py \
 	--freeze_bert \
 	--train_batch_size 32 \
 	--pregen_emb_path "/nobackup/users/nhulkund/6.864/pregen_embs/pregen_${2}_cat4_${1}" \
+	--task_type binary \
+	--other_fields age sofa sapsii_prob sapsii_prob oasis oasis_prob \
+        --gridsearch_classifier \
+        --gridsearch_c \
+        --emb_method cat4 \
+  --use_dro True
+
+python finetune_on_target.py \
+	--df_path "/nobackup/users/nhulkund/6.864/inhosp_mort" \
+	--model_path "/home/nhulkund/6.864/HurtfulWords/outputs/models/baseline_clinical_BERT_1_epoch_512" \
+	--fold_id 9 10\
+	--target_col_name "inhosp_mort" \
+	--output_dir "/home/nhulkund/6.864/HurtfulWords/outputs/models/finetuned/inhosp_mort_baseline_clinical_BERT_1_epoch_512_inhosp_mort/" \
+	--freeze_bert \
+	--train_batch_size 32 \
+	--pregen_emb_path "/nobackup/users/nhulkund/6.864/pregen_embs/pregen_baseline_clinical_BERT_1_epoch_512_cat4_inhosp_mort" \
 	--task_type binary \
 	--other_fields age sofa sapsii_prob sapsii_prob oasis oasis_prob \
         --gridsearch_classifier \

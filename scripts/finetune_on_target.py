@@ -38,7 +38,7 @@ parser.add_argument('--protected_group', help = 'name of protected group, must b
 parser.add_argument('--adv_layers', help = 'number of layers in adversary', type = int, default = 2)
 parser.add_argument('--freeze_bert', help = 'freeze all BERT layers and only use pre-trained representation', action = 'store_true')
 parser.add_argument('--train_batch_size', help = 'batch size to use for training', type = int)
-parser.add_argument('--max_num_epochs', help = 'maximum number of epochs to train for', type = int, default = 20)
+parser.add_argument('--max_num_epochs', help = 'maximum number of epochs to train for', type = int, default = 5)
 parser.add_argument('--es_patience', help = 'patience for the early stopping', type = int, default = 3)
 parser.add_argument('--other_fields', help = 'other fields to add, must be columns in df', nargs = '+', type = str, dest = 'other_fields', default = [])
 parser.add_argument('--seed', type = int, default = 42, help = 'random seed for initialization')
@@ -59,7 +59,7 @@ parser.add_argument('--pregen_emb_path', help = '''if embeddings have been preco
 parser.add_argument('--overwrite', help = 'whether to overwrite existing model/predictions', action = 'store_true')
 parser.add_argument('--use_dro', help = 'use dro', default=False, type=bool)
 args = parser.parse_args()
-
+print("FREEZE BERT ", args.freeze_bert)
 if os.path.isfile(os.path.join(args.output_dir, 'preds.pkl')) and not args.overwrite:
     print("File already exists; exiting.")
     sys.exit()
@@ -77,13 +77,15 @@ tokenizer = BertTokenizer.from_pretrained(args.model_path)
 model = BertModel.from_pretrained(args.model_path)
 
 target = args.target_col_name
+#rint("target: ", target)
+#print("columns: ", df.columns)
 assert(target in df.columns)
 
 #even if no adversary, must have valid protected group column for code to work
 #if args.use_adversary:
 protected_group = args.protected_group
-group_counts = None # TODO
-n_groups = None # TODO
+#group_counts =  None # TODO
+n_groups = 2 # TODO - chnage later
 assert(protected_group in df.columns)
 if args.use_dro:
     if args.use_new_mapping:
@@ -158,13 +160,24 @@ class EmbFeature():
         self.other_fields = other_fields
 
 class Embdataset(data.Dataset):
-    def __init__(self, features, gen_type, n_groups, group_counts):
+    def __init__(self, features, gen_type, n_groups):
         self.features = features #list of EmbFeatures
         self.gen_type = gen_type
         self.length = len(features)
         self.n_groups = n_groups # DEFINE
-        self.group_counts = group_counts # DEFINE
+        #self.group_counts = group_counts # DEFINE
         self.group_str = None # DEFINE
+
+        group_array = []
+        #y_array = []
+
+        for feat in features:
+            group_array.append(feat.group)
+            #y_array.append(feat.y)
+        self._group_array = torch.LongTensor(group_array)
+        #self._y_array = torch.LongTensor(y_array)
+        self._group_counts = (torch.arange(self.n_groups).unsqueeze(1) == self._group_array).sum(1).float()
+        #self._y_counts = (torch.arange(self.n_classes).unsqueeze(1) == self._y_array).sum(1).float()
 
     def __len__(self):
         return self.length
@@ -180,6 +193,9 @@ class Embdataset(data.Dataset):
         group = self.features[index].group # we added this and returning group for the case in which BERT is frozen and we are using DRO
 
         return emb, y, guid, other_fields, group  # why not returning the group too?
+
+    def group_counts(self):
+        return self._group_counts
 
 
 
@@ -253,7 +269,9 @@ if n_gpu > 0:
     torch.cuda.manual_seed_all(seed)
 
 if args.task_type == 'binary':
-    criterion = nn.BCELoss()
+    if args.use_dro: criterion = nn.BCELoss(reduction='none')
+    else: criterion = nn.BCELoss()
+
 elif args.task_type == 'multiclass':
     criterion = nn.CrossEntropyLoss()
 elif args.task_type == 'regression':
@@ -323,16 +341,17 @@ if args.freeze_bert: #only need to precalculate for training and val set
         features_val_embs = get_embs(val_generator)
         features_test_embs = get_embs(test_generator)
 
-    train_dataset = Embdataset(features_train_embs, 'train', n_groups, group_counts)
-    val_dataset = Embdataset(features_val_embs, 'val', n_groups, group_counts)
-    test_dataset = Embdataset(features_test_embs, 'test', n_groups, group_counts)
+    train_dataset = Embdataset(features_train_embs, 'train', n_groups)#, group_counts)
+    val_dataset = Embdataset(features_val_embs, 'val', n_groups)#, group_counts)
+    test_dataset = Embdataset(features_test_embs, 'test', n_groups)#, group_counts)
     training_generator = data.DataLoader(train_dataset, shuffle = True, batch_size = args.train_batch_size, drop_last = True)
     val_generator = data.DataLoader(val_dataset, shuffle = False,  batch_size = args.train_batch_size)
     test_generator= data.DataLoader(test_dataset, shuffle = False,  batch_size = args.train_batch_size)
 
 if args.use_dro:
     # DEAL WITH ARGUMENTS & MAKE LOSS COMPUTER FOR TEST AND VAL
-    adjustments = [0.0]
+    adjustments = np.array([0.0])
+    #print(train_dataset)
     train_loss_computer = LossComputer(
         criterion,
         is_robust=True,
@@ -415,8 +434,8 @@ def evaluate_on_set(generator, predictor, emb_gen = False, c_val=2):
                 for i in other_vars:
                     embs = torch.cat([embs, i.float().unsqueeze(dim = 1).to(device)], 1)
                 preds = predictor(embs).detach().cpu()
-                if args.use_dro and (generator.dataset.gen_type == 'val' or generator.dataset.gen_type == 'test'):
-                    loss = loss_computer.loss(outputs, y, group, is_training)
+                # if args.use_dro and (generator.dataset.gen_type == 'val' or generator.dataset.gen_type == 'test'):
+                #     loss = loss_computer.loss(preds, y.cpu(), group.cpu(), False)
                 for c,i in enumerate(guid):
                     note_id, seq_id = i.split('-')
                     group_labels[note_id] = group
@@ -471,8 +490,14 @@ def merge_preds(prediction_dict, c=2):
             merged_preds[i] = avg_probs_multiclass(np.array(prediction_dict[i]))
     return merged_preds
 
+def calculate_group_metrics(prediction_dict, group_labels):
+    df = pd.DataFrame()
+    
+
+
+print("Hyperparameter search size: ", len(grid))
 for predictor_params in grid:
-    print(predictor_params, flush = True)
+    #print(predictor_params, flush = True)
     predictor = Classifier(**predictor_params).to(device)
     if n_gpu > 1:
         predictor = torch.nn.DataParallel(predictor)
@@ -563,6 +588,8 @@ for predictor_params in grid:
                     group = group.to(device)
                     for i in other_vars:
                         embs = torch.cat([embs, i.float().unsqueeze(dim = 1).to(device)], 1)
+                    #("embds shape", embs.shape)
+                    #print("y shape", y.shape)
                     preds = predictor(embs)
                     
                     if args.use_dro:
@@ -590,10 +617,10 @@ for predictor_params in grid:
         val_loss = 0
         val_loss_computer = LossComputer(
             criterion,
-            is_robust=args.robust,
-            dataset=dataset['val_data'],
-            step_size=args.robust_step_size,
-            alpha=args.alpha)
+            is_robust=True,
+            dataset=val_dataset,
+            #step_size=args.robust_step_size,
+            alpha=0.2)
         with torch.no_grad():
             if args.freeze_bert:
                 checkpoints = {PREDICTOR_CHECKPOINT_PATH: predictor}
@@ -658,7 +685,7 @@ for predictor_params in grid:
 
     if args.gridsearch_classifier:
         auprcs = [] #one value for each in c grid
-        prediction_dict, _, _, group_labels = (val_generator, predictor, emb_gen = args.freeze_bert)
+        prediction_dict, _, _, group_labels_val = evaluate_on_set(val_generator, predictor, emb_gen = args.freeze_bert)
         for c_val in c_grid:
             merged_preds_val = merge_preds(prediction_dict, c_val)
             merged_preds_val_list = [merged_preds_val[str(i)] for i in actual_val.index]
@@ -698,7 +725,7 @@ elif args.task_type == 'regression':
 	print('MSE: %.5f' % mse)
 elif args.task_type == 'multiclass':
 	report = classification_report(actual_val.values.astype(int), np.array(merged_preds_val_list))
-	print(report)
+	#print(report)
 
 prediction_dict_test, merged_preds_test, embs_test, group_labels_test = evaluate_on_set(test_generator, predictor, emb_gen = args.freeze_bert,  c_val = opt_c)
 if args.output_train_stats:
