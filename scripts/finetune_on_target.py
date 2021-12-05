@@ -38,7 +38,7 @@ parser.add_argument('--protected_group', help = 'name of protected group, must b
 parser.add_argument('--adv_layers', help = 'number of layers in adversary', type = int, default = 2)
 parser.add_argument('--freeze_bert', help = 'freeze all BERT layers and only use pre-trained representation', action = 'store_true')
 parser.add_argument('--train_batch_size', help = 'batch size to use for training', type = int)
-parser.add_argument('--max_num_epochs', help = 'maximum number of epochs to train for', type = int, default = 5)
+parser.add_argument('--max_num_epochs', help = 'maximum number of epochs to train for', type = int, default = 1)
 parser.add_argument('--es_patience', help = 'patience for the early stopping', type = int, default = 3)
 parser.add_argument('--other_fields', help = 'other fields to add, must be columns in df', nargs = '+', type = str, dest = 'other_fields', default = [])
 parser.add_argument('--seed', type = int, default = 42, help = 'random seed for initialization')
@@ -95,6 +95,7 @@ if args.use_dro:
     else:
         mapping = Constants.mapping
 
+
 other_fields_to_include = args.other_fields
 if args.freeze_bert:
     for param in model.parameters():
@@ -121,7 +122,8 @@ val_df = df[df.fold.isin(fold_id)]
 test_df = df[df.fold == 'test']
 
 def convert_input_example(note_id, text, seqIdx, target, group, other_fields = []):
-    return InputExample(guid = '%s-%s'%(note_id,seqIdx), text_a = text, text_b = None, label = target, group = mapping[protected_group][group] if args.use_adversary else 0, other_fields = other_fields)
+    return InputExample(guid = '%s-%s'%(note_id,seqIdx), text_a = text, text_b = None, label = target, group = mapping[protected_group][group] , other_fields = other_fields)
+    #return InputExample(guid = '%s-%s'%(note_id,seqIdx), text_a = text, text_b = None, label = target, group = mapping[protected_group][group] if args.use_adversary else 0, other_fields = other_fields)
 
 # in training generator, return all folds except this.
 # in validation generator, return only this fold
@@ -438,7 +440,7 @@ def evaluate_on_set(generator, predictor, emb_gen = False, c_val=2):
                 #     loss = loss_computer.loss(preds, y.cpu(), group.cpu(), False)
                 for c,i in enumerate(guid):
                     note_id, seq_id = i.split('-')
-                    group_labels[note_id] = group
+                    group_labels[note_id] = group[c].item()
                     if args.task_type in ['binary', 'regression']:
                         prediction_dict[note_id][int(seq_id)] = preds[c].item()
                     else:
@@ -490,12 +492,30 @@ def merge_preds(prediction_dict, c=2):
             merged_preds[i] = avg_probs_multiclass(np.array(prediction_dict[i]))
     return merged_preds
 
-def calculate_group_metrics(prediction_dict, group_labels):
-    df = pd.DataFrame()
-    
+def calculate_group_metrics(merged_preds_val, group_labels, actual_vals_all):
+    all_groups = set(group_labels.values())
+    print("ALL GROUPS!!!!: ", all_groups)
+    group_to_noteids = {k: [] for k in all_groups}
+    for note_id in group_labels.keys():
+        group_to_noteids[group_labels[note_id]].append(note_id)
+    # print("GROUP TO NOTEIDS ", group_to_noteids)
+    group_to_val = {}
+    for group in all_groups:
+        group_to_val[group] = actual_vals_all.loc[group_to_noteids[group]]
+    group_to_metrics = {}
+    for group in group_to_val:
+        actual_val_per_group = group_to_val[group]
+        merged_preds_val_per_group = [merged_preds_val[str(i)] for i in actual_val_per_group.index]
+        roc = roc_auc_score(actual_val_per_group.values.astype(int), merged_preds_val_per_group)
+        acc = accuracy_score(actual_val_per_group.values.astype(int), np.array(merged_preds_val_per_group).round())
+        auprc = average_precision_score(actual_val_per_group.values.astype(int), merged_preds_val_per_group)
+        group_to_metrics[group] = {'auc':roc, 'acc':acc, 'auprc':auprc}
+    return group_to_metrics
+
 
 
 print("Hyperparameter search size: ", len(grid))
+grid=grid[1:3]
 for predictor_params in grid:
     #print(predictor_params, flush = True)
     predictor = Classifier(**predictor_params).to(device)
@@ -582,7 +602,7 @@ for predictor_params in grid:
                     pbar.update(1)
                     pbar.set_postfix_str("Running Training Loss: %.5f" % mean_loss)
             else: # if frozen, use precomputed embeddings to save time
-                for embs, y, _, other_vars, group in training_generator:
+                for embs, y, something1, other_vars, group in training_generator:
                     embs = embs.to(device)
                     y = y.to(device)
                     group = group.to(device)
@@ -697,6 +717,7 @@ for predictor_params in grid:
         es_models.append(predictor.cpu())
         optimal_cs.append(c_grid[idx_max])
         print('val AUPRC:%.5f  optimal c: %s' %(auprcs[idx_max], c_grid[idx_max] ))
+        print("group metrics: ", calculate_group_metrics(merged_preds_val, group_labels_val, actual_val))
 
 # find best predictor here, move back to cpu
 if args.gridsearch_classifier:
@@ -712,20 +733,22 @@ merged_preds_val_list = [merged_preds_val[str(i)] for i in actual_val.index]
 
 
 if args.task_type == 'binary':
-	acc = accuracy_score(actual_val.values.astype(int), np.array(merged_preds_val_list).round())
-	auprc = average_precision_score(actual_val.values.astype(int), merged_preds_val_list)
-	ll = log_loss(actual_val.values.astype(int), merged_preds_val_list)
-	roc = roc_auc_score(actual_val.values.astype(int), merged_preds_val_list)
-	print('Accuracy: %.5f' % acc)
-	print('AUPRC: %.5f' % auprc)
-	print('Log Loss: %.5f' % ll)
-	print('AUROC: %.5f' % roc)
+    acc = accuracy_score(actual_val.values.astype(int), np.array(merged_preds_val_list).round())
+    auprc = average_precision_score(actual_val.values.astype(int), merged_preds_val_list)
+    ll = log_loss(actual_val.values.astype(int), merged_preds_val_list)
+    roc = roc_auc_score(actual_val.values.astype(int), merged_preds_val_list)
+    group_metrics = calculate_group_metrics(merged_preds_val, group_labels_val, actual_val)
+    print("Group metrics: ", group_metrics)
+    print('Accuracy: %.5f' % acc)
+    print('AUPRC: %.5f' % auprc)
+    print('Log Loss: %.5f' % ll)
+    print('AUROC: %.5f' % roc)
 elif args.task_type == 'regression':
-	mse = mean_squared_error(actual_val, merged_preds_val_list)
-	print('MSE: %.5f' % mse)
+    mse = mean_squared_error(actual_val, merged_preds_val_list)
+    print('MSE: %.5f' % mse)
 elif args.task_type == 'multiclass':
-	report = classification_report(actual_val.values.astype(int), np.array(merged_preds_val_list))
-	#print(report)
+    report = classification_report(actual_val.values.astype(int), np.array(merged_preds_val_list))
+    #print(report)
 
 prediction_dict_test, merged_preds_test, embs_test, group_labels_test = evaluate_on_set(test_generator, predictor, emb_gen = args.freeze_bert,  c_val = opt_c)
 if args.output_train_stats:
