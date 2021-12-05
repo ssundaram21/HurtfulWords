@@ -37,10 +37,15 @@ class LossComputer:
 
     def loss(self, yhat, y, group_idx=None, is_training=False):
         # compute per-sample and per-group losses
+        #print("preds (inside loss)", yhat.shape)
+        #print("labels (inside loss) ", y.shape)
+        #print(type(self.criterion))
         per_sample_losses = self.criterion(yhat, y)
+        #print(per_sample_losses)
         group_loss, group_count = self.compute_group_avg(per_sample_losses, group_idx)
-        group_acc, group_count = self.compute_group_avg((torch.argmax(yhat,1)==y).float(), group_idx)
-
+        #print("yhat: ", yhat, "y: ", y, "group_idx: ", group_idx)
+        #print("\n argmax thing",(torch.argmax(yhat,0)))
+        group_acc, group_count = self.compute_group_avg((torch.argmax(yhat,0)==y).float(), group_idx)
         # update historical losses
         self.update_exp_avg_loss(group_loss, group_count)
 
@@ -97,6 +102,7 @@ class LossComputer:
         group_map = (group_idx == torch.arange(self.n_groups).unsqueeze(1).long().cuda()).float()
         group_count = group_map.sum(1)
         group_denom = group_count + (group_count==0).float() # avoid nans
+        #print(group_map.shape, losses.shape)
         group_loss = (group_map @ losses.view(-1))/group_denom
         return group_loss, group_count
 

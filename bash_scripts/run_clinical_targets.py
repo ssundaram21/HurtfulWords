@@ -2,7 +2,7 @@ import os
 import sys
 import subprocess
 import shlex
-import torch
+# import torch
 
 cols = ['Acute and unspecified renal failure',
  'Acute cerebrovascular disease',
@@ -33,15 +33,19 @@ cols = ['Acute and unspecified renal failure',
  'any_acute',
  'any_disease']
 
+cols = [cols[0]]
+
 std_models = ['baseline_clinical_BERT_1_epoch_512']#, 'adv_clinical_BERT_gender_1_epoch_512']
 
 # file name, col names, models
 # tasks = [('inhosp_mort', ['inhosp_mort'],  std_models),
 #         ('phenotype_all', cols, std_models),
 #          ('phenotype_first', cols, std_models) ]
-tasks = [('inhosp_mort', ['inhosp_mort'],  std_models)]
+# tasks = [('inhosp_mort', ['inhosp_mort'],  std_models)]
 
-print("Device: ", torch.device("cuda" if torch.cuda.is_available() else "cpu"))
+tasks = [('phenotype_all', cols, std_models)]
+
+# print("Device: ", torch.device("cuda" if torch.cuda.is_available() else "cpu"))
 
 for dfname, targetnames, models in tasks:
     for t in targetnames:
