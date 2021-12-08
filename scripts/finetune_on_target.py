@@ -60,10 +60,12 @@ parser.add_argument('--use_new_mapping', help = 'whether to use new mapping for 
 #                         Will only be used if freeze_bert. note_ids in this dictionary must a be a superset of the note_ids in df_path''', type = str)
 parser.add_argument('--overwrite', help = 'whether to overwrite existing model/predictions', action = 'store_true')
 parser.add_argument('--use_dro', help = 'use dro', default=False, type=bool)
+parser.add_argument('--test_script', default=False, type=bool)
 args = parser.parse_args()
 
 print("USING DRO: ", args.use_dro)
 print("TASK NAME: ", args.task_name)
+print("PROTECTED GROUP: ", args.protected_group)
 sys.stdout.flush()
 cols = ['Acute and unspecified renal failure',
  'Acute cerebrovascular disease',
@@ -131,8 +133,9 @@ OUTPUT_DIR = "/om/user/shobhita/data/6.864"
 df_path = f"{OUTPUT_DIR}/finetuning/{dfname}"
 model_path = f"{OUTPUT_DIR}/models/{m}"
 target_col_name = f"{t}"
-output_dir = f"{OUTPUT_DIR}/outputs/{dfname}_{m}_{t}/"
-pregen_emb_path = f"{OUTPUT_DIR}/pregen_embeds/pregen_{m}_cat4_{dfname}" \
+output_dir = f"{OUTPUT_DIR}/task_{dfname}_outputs_dro_{args.use_dro}_group_{args.protected_group}_freezebert_{args.freeze_bert}/{dfname}_{m}_{t}/"
+
+pregen_emb_path = f"{OUTPUT_DIR}/pregen_embeds/pregen_{m}_cat4_{dfname}" if args.freeze_bert else None
 
 print("FREEZE BERT ", args.freeze_bert)
 if os.path.isfile(os.path.join(output_dir, 'preds.pkl')) and not args.overwrite:
@@ -160,8 +163,10 @@ assert (target in df.columns)
 # if args.use_adversary:
 protected_group = args.protected_group
 # group_counts =  None # TODO
-n_groups = 2  # TODO - chnage later
 assert (protected_group in df.columns)
+
+mapping = Constants.mapping
+
 if args.use_dro:
     if args.use_new_mapping:
         mapping = Constants.newmapping
@@ -170,9 +175,16 @@ if args.use_dro:
     else:
         mapping = Constants.mapping
 
+
 other_fields_to_include = args.other_fields
+print("NUM PARAMS", len(list(model.parameters())))
+num_params = len(list(model.parameters()))
+sys.stdout.flush()
 if args.freeze_bert:
     for param in model.parameters():
+        param.requires_grad = False
+else:
+    for param in list(model.parameters())[:-1*int(num_params*0.2)]:
         param.requires_grad = False
 
 print(df['fold'].head())
@@ -195,10 +207,13 @@ train_df = df[~df.fold.isin(['test', 'NA', *fold_id])]
 val_df = df[df.fold.isin(fold_id)]
 test_df = df[df.fold == 'test']
 
+n_groups = len(df[args.protected_group].unique())
+print("N GROUPS: ", n_groups)
+sys.stdout.flush()
 
 def convert_input_example(note_id, text, seqIdx, target, group, other_fields=[]):
     return InputExample(guid='%s-%s' % (note_id, seqIdx), text_a=text, text_b=None, label=target,
-                        group=mapping[protected_group][group] if args.use_adversary else 0, other_fields=other_fields)
+                        group=mapping[protected_group][group], other_fields=other_fields)
 
 
 # in training generator, return all folds except this.
@@ -206,19 +221,19 @@ def convert_input_example(note_id, text, seqIdx, target, group, other_fields=[])
 
 # i is the sequence within the row, c is the counter of the sequence, idx is the row number
 print('Converting input examples to appropriate format...', flush=True)
-examples_train = [convert_input_example(idx, i, c, row[target], row[protected_group] if args.use_dro else 0,
+examples_train = [convert_input_example(idx, i, c, row[target], row[protected_group],
                                         [] if len(other_fields_to_include) == 0 else row[
                                             other_fields_to_include].values.tolist())
                   for idx, row in train_df.iterrows()
                   for c, i in enumerate(row.seqs)]
 
-examples_eval = [convert_input_example(idx, i, c, row[target], row[protected_group] if args.use_dro else 0,
+examples_eval = [convert_input_example(idx, i, c, row[target], row[protected_group],
                                        [] if len(other_fields_to_include) == 0 else row[
                                            other_fields_to_include].values.tolist())
                  for idx, row in val_df.iterrows()
                  for c, i in enumerate(row.seqs)]
 
-examples_test = [convert_input_example(idx, i, c, row[target], row[protected_group] if args.use_dro else 0,
+examples_test = [convert_input_example(idx, i, c, row[target], row[protected_group],
                                        [] if len(other_fields_to_include) == 0 else row[
                                            other_fields_to_include].values.tolist())
                  for idx, row in test_df.iterrows()
@@ -245,23 +260,23 @@ class EmbFeature():
 
 class Embdataset(data.Dataset):
     def __init__(self, features, gen_type, n_groups):
-        self.features = features  # list of EmbFeatures
+        self.features = features #list of EmbFeatures
         self.gen_type = gen_type
         self.length = len(features)
-        self.n_groups = n_groups  # DEFINE
-        # self.group_counts = group_counts # DEFINE
-        self.group_str = None  # DEFINE
+        self.n_groups = n_groups # DEFINE
+        #self.group_counts = group_counts # DEFINE
+        self.group_str = None # DEFINE
 
         group_array = []
-        # y_array = []
+        #y_array = []
 
         for feat in features:
             group_array.append(feat.group)
-            # y_array.append(feat.y)
+            #y_array.append(feat.y)
         self._group_array = torch.LongTensor(group_array)
-        # self._y_array = torch.LongTensor(y_array)
+        #self._y_array = torch.LongTensor(y_array)
         self._group_counts = (torch.arange(self.n_groups).unsqueeze(1) == self._group_array).sum(1).float()
-        # self._y_counts = (torch.arange(self.n_classes).unsqueeze(1) == self._y_array).sum(1).float()
+        #self._y_counts = (torch.arange(self.n_classes).unsqueeze(1) == self._y_array).sum(1).float()
 
     def __len__(self):
         return self.length
@@ -281,7 +296,6 @@ class Embdataset(data.Dataset):
 
     def group_counts(self):
         return self._group_counts
-
 
 """class Discriminator(nn.Module):
     def __init__(self, input_dim, num_layers, num_categories, lm):
@@ -328,6 +342,9 @@ else:
         'dropout_prob': args.dropout,
         'task_type': args.task_type
     }]
+
+if args.test_script:
+    grid = grid[0:1]
 
 if args.task_type == 'multiclass':
     for i in grid:
@@ -396,6 +413,16 @@ def get_embs(generator):
                     EmbFeature(emb=emb, y=y[c], guid=i, group=group, other_fields=[i[c] for i in other_vars]))
     return features
 
+def get_group_counts(n_groups, features):
+    group_array = []
+    # y_array = []
+
+    for feat in features:
+        group_array.append(feat.group)
+        # y_array.append(feat.y)
+    group_array = torch.LongTensor(group_array)
+    # self._y_array = torch.LongTensor(y_array)
+    return (torch.arange(n_groups).unsqueeze(1) == group_array).sum(1).float()
 
 print('Featurizing examples...', flush=True)
 sys.stdout.flush()
@@ -403,23 +430,26 @@ if not pregen_emb_path:  # happens if not freeze bert
     features_train = convert_examples_to_features(examples_train,
                                                   Constants.MAX_SEQ_LEN, tokenizer, output_mode=(
             'regression' if args.task_type == 'regression' else 'classification'))
+    train_group_counts = get_group_counts(n_groups, features_train)
 
     features_eval = convert_examples_to_features(examples_eval,
                                                  Constants.MAX_SEQ_LEN, tokenizer, output_mode=(
             'regression' if args.task_type == 'regression' else 'classification'))
+    val_group_counts = get_group_counts(n_groups, features_eval)
 
     features_test = convert_examples_to_features(examples_test,
                                                  Constants.MAX_SEQ_LEN, tokenizer, output_mode=(
             'regression' if args.task_type == 'regression' else 'classification'))
+    test_group_counts = get_group_counts(n_groups, features_test)
 
-    training_set = MIMICDataset(features_train, 'train', args.task_type)
-    training_generator = data.DataLoader(training_set, shuffle=True, batch_size=args.train_batch_size, drop_last=True)
+    train_dataset = MIMICDataset(features_train, 'train', args.task_type)
+    training_generator = data.DataLoader(train_dataset, shuffle=True, batch_size=args.train_batch_size, drop_last=True)
 
-    val_set = MIMICDataset(features_eval, 'val', args.task_type)
-    val_generator = data.DataLoader(val_set, shuffle=False, batch_size=args.train_batch_size)
+    val_dataset = MIMICDataset(features_eval, 'val', args.task_type)
+    val_generator = data.DataLoader(val_dataset, shuffle=False, batch_size=args.train_batch_size)
 
-    test_set = MIMICDataset(features_test, 'test', args.task_type)
-    test_generator = data.DataLoader(test_set, shuffle=False, batch_size=args.train_batch_size)
+    test_dataset = MIMICDataset(features_test, 'test', args.task_type)
+    test_generator = data.DataLoader(test_dataset, shuffle=False, batch_size=args.train_batch_size)
 
 if args.freeze_bert:  # only need to precalculate for training and val set
     if pregen_emb_path:
@@ -440,20 +470,37 @@ if args.freeze_bert:  # only need to precalculate for training and val set
     test_generator = data.DataLoader(test_dataset, shuffle=False, batch_size=args.train_batch_size)
 
 if args.use_dro:
+    if args.freeze_bert:
     # DEAL WITH ARGUMENTS & MAKE LOSS COMPUTER FOR TEST AND VAL
-    adjustments = np.array([0.0])
-    # print(train_dataset)
-    train_loss_computer = LossComputer(
-        criterion,
-        is_robust=True,
-        dataset=train_dataset,
-        alpha=0.2,
-        gamma=0.1,
-        adj=adjustments,
-        step_size=0.01,
-        normalize_loss=True,
-        btl=False,
-        min_var_weight=0)
+        adjustments = np.array([0.0])
+        train_loss_computer = LossComputer(
+            criterion,
+            is_robust=True,
+            dataset=train_dataset,
+            alpha=0.2,
+            gamma=0.1,
+            adj=adjustments,
+            step_size=0.01,
+            normalize_loss=True,
+            btl=False,
+            min_var_weight=0,
+            n_groups=n_groups)
+    else:
+        adjustments = np.array([0.0])
+        train_loss_computer = LossComputer(
+            criterion,
+            is_robust=True,
+            dataset=train_dataset,
+            alpha=0.2,
+            gamma=0.1,
+            adj=adjustments,
+            step_size=0.01,
+            normalize_loss=True,
+            btl=False,
+            min_var_weight=0,
+            n_groups=n_groups,
+            group_counts=train_group_counts)
+
 
 num_train_epochs = args.max_num_epochs
 learning_rate = args.lr
@@ -499,23 +546,23 @@ def evaluate_on_set(generator, predictor, emb_gen=False, c_val=2):
     if generator.dataset.gen_type == 'val':
         prediction_dict = {str(idx): [0] * row['num_seqs'] for idx, row in val_df.iterrows()}
         embs = {str(idx): np.zeros(shape=(row['num_seqs'], EMB_SIZE)) for idx, row in val_df.iterrows()}
-        if args.use_dro:
-            loss_computer = LossComputer(
-                criterion,
-                is_robust=True,
-                dataset=val_dataset,
-                step_size=0.01,
-                alpha=0.2)
+        # if args.use_dro:
+        #     loss_computer = LossComputer(
+        #         criterion,
+        #         is_robust=True,
+        #         dataset=val_dataset,
+        #         step_size=0.01,
+        #         alpha=0.2)
     elif generator.dataset.gen_type == 'test':
         prediction_dict = {str(idx): [0] * row['num_seqs'] for idx, row in test_df.iterrows()}
         embs = {str(idx): np.zeros(shape=(row['num_seqs'], EMB_SIZE)) for idx, row in test_df.iterrows()}
-        if args.use_dro:
-            loss_computer = LossComputer(
-                criterion,
-                is_robust=True,
-                dataset=test_dataset,
-                step_size=0.01,
-                alpha=0.2)
+        # if args.use_dro:
+        #     loss_computer = LossComputer(
+        #         criterion,
+        #         is_robust=True,
+        #         dataset=test_dataset,
+        #         step_size=0.01,
+        #         alpha=0.2)
     elif generator.dataset.gen_type == 'train':
         prediction_dict = {str(idx): [0] * row['num_seqs'] for idx, row in train_df.iterrows()}
         embs = {str(idx): np.zeros(shape=(row['num_seqs'], EMB_SIZE)) for idx, row in train_df.iterrows()}
@@ -534,7 +581,7 @@ def evaluate_on_set(generator, predictor, emb_gen=False, c_val=2):
                 #     loss = loss_computer.loss(preds, y.cpu(), group.cpu(), False)
                 for c, i in enumerate(guid):
                     note_id, seq_id = i.split('-')
-                    group_labels[note_id] = group
+                    group_labels[note_id] = group[c].item()
                     if args.task_type in ['binary', 'regression']:
                         prediction_dict[note_id][int(seq_id)] = preds[c].item()
                     else:
@@ -558,6 +605,7 @@ def evaluate_on_set(generator, predictor, emb_gen=False, c_val=2):
 
                 for c, i in enumerate(guid):
                     note_id, seq_id = i.split('-')
+                    group_labels[note_id] = group[c].item()
                     if args.task_type in ['binary', 'regression']:
                         prediction_dict[note_id][int(seq_id)] = preds[c].item()
                     else:
@@ -586,13 +634,30 @@ def merge_preds(prediction_dict, c=2):
             merged_preds[i] = avg_probs_multiclass(np.array(prediction_dict[i]))
     return merged_preds
 
+def calculate_group_metrics(merged_preds_val, group_labels, actual_vals_all):
+    all_groups = set(group_labels.values())
+    group_to_noteids = {k: [] for k in all_groups}
+    for note_id in group_labels.keys():
+        group_to_noteids[group_labels[note_id]].append(note_id)
+    # print("GROUP TO NOTEIDS ", group_to_noteids)
+    group_to_val = {}
+    for group in all_groups:
+        group_to_val[group] = actual_vals_all.loc[group_to_noteids[group]]
+    group_to_metrics = {}
+    for group in group_to_val:
+        actual_val_per_group = group_to_val[group]
+        merged_preds_val_per_group = [merged_preds_val[str(i)] for i in actual_val_per_group.index]
+        roc = roc_auc_score(actual_val_per_group.values.astype(int), merged_preds_val_per_group)
+        acc = accuracy_score(actual_val_per_group.values.astype(int), np.array(merged_preds_val_per_group).round())
+        auprc = average_precision_score(actual_val_per_group.values.astype(int), merged_preds_val_per_group)
+        group_to_metrics[group] = {'auc':roc, 'acc':acc, 'auprc':auprc}
+    return group_to_metrics
 
-def calculate_group_metrics(prediction_dict, group_labels):
-    df = pd.DataFrame()
-
-
+# grid = grid[0:1]
 print("Hyperparameter search size: ", len(grid))
 sys.stdout.flush()
+
+all_losses = []
 for predictor_params in grid:
     # print(predictor_params, flush = True)
     predictor = Classifier(**predictor_params).to(device)
@@ -625,6 +690,7 @@ for predictor_params in grid:
                          t_total=num_train_optimization_steps)
     warmup_linear = WarmupLinearSchedule(warmup=warmup_proportion,
                                          t_total=num_train_optimization_steps)
+    losses = []
     for epoch in range(1, num_train_epochs + 1):
         # training
         if not args.freeze_bert:
@@ -636,89 +702,102 @@ for predictor_params in grid:
         #        discriminator.train()
         running_loss = 0.0
         num_steps = 0
-        with tqdm(total=len(training_generator), desc="Epoch %s" % epoch) as pbar:
-            if not args.freeze_bert:  # skip for now -- we are freezing BERT
-                for input_ids, input_mask, segment_ids, y, group, _, other_vars in training_generator:
-                    input_ids = input_ids.to(device)
-                    segment_ids = segment_ids.to(device)
-                    input_mask = input_mask.to(device)
-                    y = y.to(device)
-                    group = group.to(device)
+        # with total=len(training_generator), desc="Epoch %s" % epoch as pbar:
+        if not args.freeze_bert:  # skip for now -- we are freezing BERT
+            for input_ids, input_mask, segment_ids, y, group, _, other_vars in training_generator:
+                input_ids = input_ids.to(device)
+                segment_ids = segment_ids.to(device)
+                input_mask = input_mask.to(device)
+                y = y.to(device)
+                group = group.to(device)
 
-                    hidden_states, _ = model(input_ids, token_type_ids=segment_ids, attention_mask=input_mask)
-                    bert_out = extract_embeddings(hidden_states, args.emb_method)
+                hidden_states, _ = model(input_ids, token_type_ids=segment_ids, attention_mask=input_mask)
+                bert_out = extract_embeddings(hidden_states, args.emb_method)
 
-                    for i in other_vars:
-                        bert_out = torch.cat([bert_out, i.float().unsqueeze(dim=1).to(device)], 1)
+                for i in other_vars:
+                    bert_out = torch.cat([bert_out, i.float().unsqueeze(dim=1).to(device)], 1)
 
-                    preds = predictor(bert_out)
+                preds = predictor(bert_out)
+
+                if args.use_dro:
+                    # DON'T KNOW g (GROUP ID)
+                    loss = train_loss_computer.loss(preds, y, group, is_training=True)
+                else:
                     loss = criterion(preds, y)
 
-                    if args.use_adversary:
-                        adv_input = bert_out[:, :-len(other_vars)]
-                        if args.fairness_def == 'odds':
-                            adv_input = torch.cat([adv_input, y.unsqueeze(dim=1)], 1)
-                        adv_pred = discriminator(adv_input)
-                        adv_loss = criterion_adv(adv_pred, group)
+                # if args.use_adversary:
+                #     adv_input = bert_out[:, :-len(other_vars)]
+                #     if args.fairness_def == 'odds':
+                #         adv_input = torch.cat([adv_input, y.unsqueeze(dim=1)], 1)
+                #     adv_pred = discriminator(adv_input)
+                #     adv_loss = criterion_adv(adv_pred, group)
 
-                    if n_gpu > 1:
-                        loss = loss.mean()
-                        if args.use_adversary:
-                            adv_loss = adv_loss.mean()
+                # if n_gpu > 1:
+                #     loss = loss.mean()
+                #     if args.use_adversary:
+                #         adv_loss = adv_loss.mean()
 
-                    if args.use_adversary:
-                        loss += adv_loss
+                # if args.use_adversary:
+                #     loss += adv_loss
 
-                    loss.backward()
-                    optimizer.step()
-                    optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+                optimizer.zero_grad()
 
-                    num_steps += 1
-                    running_loss += loss.item()
-                    mean_loss = running_loss / num_steps
+                num_steps += 1
+                running_loss += loss.item()
+                mean_loss = running_loss / num_steps
 
-                    pbar.update(1)
-                    pbar.set_postfix_str("Running Training Loss: %.5f" % mean_loss)
-            else:  # if frozen, use precomputed embeddings to save time
-                for embs, y, _, other_vars, group in training_generator:
-                    embs = embs.to(device)
-                    y = y.to(device)
-                    group = group.to(device)
-                    for i in other_vars:
-                        embs = torch.cat([embs, i.float().unsqueeze(dim=1).to(device)], 1)
-                    # ("embds shape", embs.shape)
-                    # print("y shape", y.shape)
-                    preds = predictor(embs)
+                # pbar.update(1)
+                # pbar.set_postfix_str("Running Training Loss: %.5f" % mean_loss)
+        else:  # if frozen, use precomputed embeddings to save time
+            for embs, y, _, other_vars, group in training_generator:
+                embs = embs.to(device)
+                y = y.to(device)
+                group = group.to(device)
+                for i in other_vars:
+                    embs = torch.cat([embs, i.float().unsqueeze(dim=1).to(device)], 1)
+                # ("embds shape", embs.shape)
+                # print("y shape", y.shape)
+                preds = predictor(embs)
 
-                    if args.use_dro:
-                        # DON'T KNOW g (GROUP ID)
-                        loss = train_loss_computer.loss(preds, y, group, is_training=True)
-                    else:
-                        loss = criterion(preds, y)
+                if args.use_dro:
+                    # DON'T KNOW g (GROUP ID)
+                    loss = train_loss_computer.loss(preds, y, group, is_training=True)
+                else:
+                    loss = criterion(preds, y)
 
-                    if n_gpu > 1:
-                        loss = loss.mean()
-                    loss.backward()
-                    optimizer.step()
-                    optimizer.zero_grad()
+                if n_gpu > 1:
+                    loss = loss.mean()
+                loss.backward()
+                optimizer.step()
+                optimizer.zero_grad()
 
-                    num_steps += 1
-                    running_loss += loss.item()
-                    mean_loss = running_loss / num_steps
+                num_steps += 1
+                running_loss += loss.item()
+                mean_loss = running_loss / num_steps
 
-                    pbar.update(1)
-                    pbar.set_postfix_str("Running Training Loss: %.5f" % mean_loss)
+                # pbar.update(1)
+                # pbar.set_postfix_str("Running Training Loss: %.5f" % mean_loss)
 
         # evaluate here
         model.eval()
         predictor.eval()
         val_loss = 0
-        val_loss_computer = LossComputer(
-            criterion,
-            is_robust=True,
-            dataset=val_dataset,
-            # step_size=args.robust_step_size,
-            alpha=0.2)
+        if args.freeze_bert:
+            val_loss_computer = LossComputer(
+                criterion,
+                is_robust=True,
+                dataset=val_dataset,
+                alpha=0.2)
+        else:
+            val_loss_computer = LossComputer(
+                criterion,
+                is_robust=True,
+                dataset=val_dataset,
+                alpha=0.2,
+                n_groups=n_groups,
+                group_counts=train_group_counts)
         with torch.no_grad():
             if args.freeze_bert:
                 checkpoints = {PREDICTOR_CHECKPOINT_PATH: predictor}
@@ -734,8 +813,8 @@ for predictor_params in grid:
                     else:
                         loss = criterion(preds, y)
 
-                    if n_gpu > 1:
-                        loss = loss.mean()
+                    # if n_gpu > 1:
+                    #     loss = loss.mean()
                     val_loss += loss.item()
 
                 val_loss /= len(val_generator)
@@ -758,23 +837,25 @@ for predictor_params in grid:
 
                     preds = predictor(bert_out)
                     loss = criterion(preds, y)
-                    if n_gpu > 1:
-                        loss = loss.mean()
-                        if args.use_adversary:
-                            adv_loss = adv_loss.mean()
-
-                    if args.use_adversary:
-                        loss += adv_loss
+                    # if n_gpu > 1:
+                    #     loss = loss.mean()
+                    #     if args.use_adversary:
+                    #         adv_loss = adv_loss.mean()
+                    #
+                    # if args.use_adversary:
+                    #     loss += adv_loss
 
                     val_loss += loss.item()
                 val_loss /= len(val_generator)
 
         print('Val loss: %s' % val_loss, flush=True)
+        losses.append({"Train": mean_loss, "Val": val_loss})
         sys.stdout.flush()
         es(val_loss, checkpoints)
         if es.early_stop:
             break
 
+    all_losses.append(losses)
     print('Trained for %s epochs' % epoch)
     sys.stdout.flush()
     predictor.load_state_dict(load_checkpoint(PREDICTOR_CHECKPOINT_PATH))
@@ -804,7 +885,9 @@ for predictor_params in grid:
 if args.gridsearch_classifier:
     idx_max = np.argmax(grid_auprcs)
     predictor = es_models[idx_max].to(device)
+    predictor_params = grid[idx_max]
     opt_c = optimal_cs[idx_max]
+    loss_summary = all_losses[idx_max]
 else:
     opt_c = 2.0
 
@@ -823,6 +906,16 @@ if args.task_type == 'binary':
     print('AUPRC: %.5f' % auprc)
     print('Log Loss: %.5f' % ll)
     print('AUROC: %.5f' % roc)
+    group_metrics = calculate_group_metrics(merged_preds_val, group_labels_val, actual_val)
+    print("group metrics: ", group_metrics)
+    pickle.dump({
+        'group metrics': group_metrics,
+        'acc': acc,
+        'auprc': auprc,
+        'log loss': ll,
+        'auc': roc
+    }, open(os.path.join(output_dir, 'group_metrics.pkl'), 'wb'))
+    pickle.dump(loss_summary, open(os.path.join(output_dir, 'losses.pkl'), 'wb'))
 elif args.task_type == 'regression':
     mse = mean_squared_error(actual_val, merged_preds_val_list)
     print('MSE: %.5f' % mse)

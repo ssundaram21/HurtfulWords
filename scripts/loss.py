@@ -5,7 +5,19 @@ import torch.nn.functional as F
 import numpy as np
 
 class LossComputer:
-    def __init__(self, criterion, is_robust, dataset, alpha=None, gamma=0.1, adj=None, min_var_weight=0, step_size=0.01, normalize_loss=False, btl=False):
+    def __init__(self,
+                 criterion,
+                 is_robust,
+                 dataset,
+                 alpha=None,
+                 gamma=0.1,
+                 adj=None,
+                 min_var_weight=0,
+                 step_size=0.01,
+                 normalize_loss=False,
+                 btl=False,
+                 n_groups=None,
+                 group_counts=None):
         self.criterion = criterion
         self.is_robust = is_robust
         self.gamma = gamma
@@ -15,10 +27,10 @@ class LossComputer:
         self.normalize_loss = normalize_loss
         self.btl = btl
 
-        self.n_groups = dataset.n_groups
-        self.group_counts = dataset.group_counts().cuda()
+        self.n_groups = n_groups if n_groups is not None else dataset.n_groups
+        self.group_counts = dataset.group_counts().cuda() if group_counts is None else group_counts
         self.group_frac = self.group_counts/self.group_counts.sum()
-        self.group_str = dataset.group_str
+        self.group_str = None
 
         if adj is not None:
             self.adj = torch.from_numpy(adj).float().cuda()

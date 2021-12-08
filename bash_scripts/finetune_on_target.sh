@@ -1,11 +1,12 @@
 #!/bin/bash
 #SBATCH -c 2
-#SBATCH --job-name=PF
-#SBATCH --mem=10GB
-#SBATCH -t 10:00:00
+#SBATCH --exclude=node021,node037
+#SBATCH --job-name=PA_race_true
+#SBATCH --mem=50GB
+#SBATCH -t 15:00:00
 #SBATCH --gres=gpu:1
 #SBATCH --constraint=any-gpu
-#SBATCH --partition=normal
+#SBATCH --partition=cbmm
 #SBATCH --array=0-27
 
 
@@ -22,16 +23,23 @@ BASE_DIR="/om/user/shobhita/src/HurtfulWords"
 OUTPUT_DIR="/om/user/shobhita/data/6.864"
 
 cd "$BASE_DIR/scripts"
+/om2/user/jakubk/miniconda3/envs/torch/bin/python -c 'import torch; print(torch.rand(2,3).cuda())'
 
 singularity exec -B /om:/om --nv /om/user/shobhita/singularity/hurtfulwords_latest.sif \
 python finetune_on_target.py \
   --idx ${SLURM_ARRAY_TASK_ID} \
-  --task_name phenotype_first \
+  --task_name phenotype_all \
 	--fold_id 9 10\
-	--freeze_bert \
+	--max_num_epochs 20 \
 	--train_batch_size 32 \
 	--task_type binary \
 	--other_fields age sofa sapsii_prob sapsii_prob oasis oasis_prob \
-        --gridsearch_classifier \
-        --gridsearch_c \
-        --emb_method cat4
+  --gridsearch_c \
+        --emb_method cat4 \
+        --protected_group "ethnicity_to_use" \
+  --overwrite \
+  	--gridsearch_classifier \
+  	--freeze_bert \
+  	  --use_dro "True"
+#  --test_script "True" \
+
